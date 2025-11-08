@@ -8,6 +8,7 @@ from typing import List, Dict, Any, Optional
 from loguru import logger
 
 from seerr.config import OVERSEERR_API_BASE_URL, OVERSEERR_API_KEY
+from seerr.jellyfin import refresh_jellyfin_library
 
 def get_overseerr_media_requests() -> list[dict]:
     """
@@ -104,6 +105,7 @@ def mark_completed(media_id: int, tmdb_id: int) -> bool:
             # Verify that the response contains the correct tmdb_id
             if response_data.get('tmdbId') == tmdb_id:
                 logger.info(f"Marked media {media_id} as completed in overseerr. Response: {response_data}")
+                refresh_jellyfin_library()
                 return True
             else:
                 logger.error(f"TMDB ID mismatch for media {media_id}. Expected {tmdb_id}, got {response_data.get('tmdbId')}")
