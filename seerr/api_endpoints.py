@@ -12,6 +12,7 @@ from seerr.task_config_manager import task_config
 from seerr.background_tasks import refresh_all_scheduled_tasks, refresh_queue_sizes, get_queue_status
 from seerr.db_logger import log_info, log_error
 from seerr.env_file_manager import env_file
+from seerr.jellyfin import refresh_jellyfin_library
 import os
 
 app = FastAPI(title="SeerrBridge API", version="0.8.0")
@@ -46,6 +47,19 @@ async def refresh_tasks():
         }
     except Exception as e:
         log_error("API Error", f"Error refreshing tasks: {e}", module="api_endpoints", function="refresh_tasks")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/jellyfin/refresh")
+async def trigger_jellyfin_refresh():
+    """Manually trigger Jellyfin library refresh"""
+    try:
+        success = refresh_jellyfin_library()
+        if success:
+            return {"success": True, "message": "Jellyfin library refresh triggered successfully"}
+        else:
+            raise HTTPException(status_code=500, detail="Failed to trigger Jellyfin refresh. Check logs/config.")
+    except Exception as e:
+        log_error("API Error", f"Error triggering Jellyfin refresh: {e}", module="api_endpoints", function="trigger_jellyfin_refresh")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/task-config")
@@ -162,6 +176,8 @@ async def get_config():
             'rd_client_secret': 'RD_CLIENT_SECRET',
             'overseerr_base': 'OVERSEERR_BASE',
             'overseerr_api_key': 'OVERSEERR_API_KEY',
+            'jellyfin_api_key': 'JELLYFIN_API_KEY',
+            'jellyfin_base_url': 'JELLYFIN_BASE_URL',
             'trakt_api_key': 'TRAKT_API_KEY',
             'discord_webhook_url': 'DISCORD_WEBHOOK_URL',
             'headless_mode': 'HEADLESS_MODE',
@@ -183,7 +199,7 @@ async def get_config():
         sensitive_keys = {
             'rd_access_token', 'rd_refresh_token', 'rd_client_id', 'rd_client_secret',
             'overseerr_api_key', 'trakt_api_key', 'discord_webhook_url',
-            'db_password', 'mysql_root_password'
+            'db_password', 'mysql_root_password', 'jellyfin_api_key'
         }
         
         # Read from .env file
@@ -303,6 +319,8 @@ async def update_config(config_data: dict):
             'rd_client_secret': 'RD_CLIENT_SECRET',
             'overseerr_base': 'OVERSEERR_BASE',
             'overseerr_api_key': 'OVERSEERR_API_KEY',
+            'jellyfin_api_key': 'JELLYFIN_API_KEY',
+            'jellyfin_base_url': 'JELLYFIN_BASE_URL',
             'trakt_api_key': 'TRAKT_API_KEY',
             'discord_webhook_url': 'DISCORD_WEBHOOK_URL',
             'headless_mode': 'HEADLESS_MODE',
