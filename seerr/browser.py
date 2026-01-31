@@ -7,6 +7,8 @@ import time
 import os
 import requests
 import zipfile
+import subprocess
+import re
 import io
 from loguru import logger
 from selenium import webdriver
@@ -36,6 +38,32 @@ library_stats = {
     "total_size_tb": 0.0,
     "last_updated": None
 }
+
+def get_installed_chrome_version(binary_path):
+    """
+    Check the version of the Chrome binary at the given path.
+    """
+    if not binary_path or not os.path.exists(binary_path):
+        return None
+    
+    try:
+        # Run the binary with --version to get the version string
+        result = subprocess.run(
+            [binary_path, "--version"], 
+            stdout=subprocess.PIPE, 
+            stderr=subprocess.PIPE, 
+            text=True
+        )
+        version_output = result.stdout.strip()
+        # Extract version pattern like 120.0.6099.109
+        match = re.search(r"(\d+\.\d+\.\d+\.\d+)", version_output)
+        if match:
+            return match.group(1)
+    except Exception as e:
+        logger.warning(f"Could not detect version for binary {binary_path}: {e}")
+        
+    return None
+
 def get_latest_chrome_driver():
     """
     Fetch the latest stable Chrome driver from Google's Chrome for Testing.
@@ -110,62 +138,108 @@ async def initialize_browser():
     global driver
     if driver is None:
         logger.info("Starting persistent browser session.")
+        
         # Detect the current operating system
-        current_os = platform.system().lower() # Returns 'windows', 'linux', or 'darwin' (macOS)
+        current_os = platform.system().lower()
         current_arch = platform.machine().lower()
         logger.info(f"Detected operating system: {current_os}, architecture: {current_arch}")
+        
         options = Options()
+        chrome_binary_path = None
+
         ### Handle Docker/Linux-specific configurations
         if current_os == "linux" and os.getenv("RUNNING_IN_DOCKER", "false").lower() == "true":
             logger.info("Detected Linux environment inside Docker. Applying Linux-specific configurations.")
             # Explicitly set the Chrome binary location
-            options.binary_location = os.getenv("CHROME_BIN", "/usr/bin/google-chrome")
-            # Enable headless mode for Linux/Docker environments
-            options.add_argument("--headless=new") # Updated modern headless flag
-            options.add_argument("--no-sandbox") # Required for running as root in Docker
-            options.add_argument("--disable-dev-shm-usage") # Handle shared memory limitations
-            options.add_argument("--disable-gpu") # Disable GPU rendering for headless environments
-            options.add_argument("--disable-setuid-sandbox") # Bypass setuid sandbox
-        ### Handle Windows-specific configurations
-        elif current_os == "windows":
-            logger.info("Detected Windows environment. Applying Windows-specific configurations.")
+            chrome_binary_path = os.getenv("CHROME_BIN", "/usr/bin/google-chrome")
+            options.binary_location = chrome_binary_path
+            
+            options.add_argument("--headless=new") 
+            options.add_argument("--no-sandbox") 
+            options.add_argument("--disable-dev-shm-usage") 
+            options.add_argument("--disable-gpu") 
+            options.add_argument("--disable-setuid-sandbox") 
+
+        ### Handle ARM Linux (Raspberry Pi)
         elif current_os == "linux" and current_arch in ['aarch64', 'arm64']:
             logger.info("Detected ARM Linux environment (likely Raspberry Pi). Applying ARM-specific configurations.")
-            options.binary_location = "/usr/bin/chromium-browser"
+            chrome_binary_path = "/usr/bin/chromium-browser"
+            options.binary_location = chrome_binary_path
+            
             if HEADLESS_MODE:
                 options.add_argument("--headless=new")
             options.add_argument("--no-sandbox")
             options.add_argument("--disable-dev-shm-usage")
             options.add_argument("--disable-gpu")
             options.add_argument("--disable-setuid-sandbox")
-        if HEADLESS_MODE:
-            options.add_argument("--headless=new") # Modern headless mode for Chrome
-        options.add_argument("--disable-gpu") # Disable GPU for Docker compatibility
-        options.add_argument("--no-sandbox") # Required for running browser as root
-        options.add_argument("--disable-dev-shm-usage") # Disable shared memory usage restrictions
-        options.add_argument("--disable-setuid-sandbox") # Disable sandboxing for root permissions
+            
+        ### Handle Windows-specific configurations
+        elif current_os == "windows":
+            logger.info("Detected Windows environment. Applying Windows-specific configurations.")
+            # Attempt to find Chrome path on Windows for version checking
+            possible_paths = [
+                r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+                r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"
+            ]
+            for p in possible_paths:
+                if os.path.exists(p):
+                    chrome_binary_path = p
+                    break
+
+        if HEADLESS_MODE and "headless" not in [arg.split("=")[0] for arg in options.arguments]:
+            options.add_argument("--headless=new")
+
+        options.add_argument("--disable-gpu")
+        options.add_argument("--no-sandbox")
+        options.add_argument("--disable-dev-shm-usage")
+        options.add_argument("--disable-setuid-sandbox")
         options.add_argument("--enable-logging")
-        options.add_argument("--window-size=1920,1080") # Set explicit window size to avoid rendering issues
+        options.add_argument("--window-size=1920,1080")
+        
         # WebDriver options to suppress infobars and disable automation detection
         options.add_argument("--disable-blink-features=AutomationControlled")
         options.add_argument("--disable-infobars")
         options.add_experimental_option("excludeSwitches", ["enable-automation"])
         options.add_experimental_option("useAutomationExtension", False)
         options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/117.0.0.0 Safari/537.36")
+        
         try:
-            # Get the latest Chrome driver from Google's Chrome for Testing
-            chrome_driver_path = get_latest_chrome_driver()
-          
-            if chrome_driver_path and os.path.exists(chrome_driver_path):
-                logger.info(f"Using Chrome driver from Chrome for Testing: {chrome_driver_path}")
-                driver = webdriver.Chrome(service=Service(chrome_driver_path), options=options)
-            else:
-                # Fallback to WebDriver Manager if download fails
-                logger.warning("Failed to get Chrome driver from Chrome for Testing. Falling back to appropriate driver.")
+            # 1. Attempt to detect installed Chrome version
+            detected_version = get_installed_chrome_version(chrome_binary_path)
+            driver_path = None
+            
+            if detected_version:
+                logger.info(f"Detected installed Chrome version: {detected_version}")
+                try:
+                    # Try to install the EXACT matching driver version
+                    logger.info(f"Attempting to install matching driver for version {detected_version}...")
+                    driver_path = ChromeDriverManager(driver_version=detected_version).install()
+                    logger.success(f"Matched driver found: {driver_path}")
+                except Exception as e:
+                    logger.warning(f"Failed to install matched driver: {e}")
+            
+            # 2. Fallback: Use existing custom downloader (Forces Latest Stable)
+            if not driver_path:
+                logger.info("Falling back to fetching latest stable driver...")
+                potential_path = get_latest_chrome_driver()
+                if potential_path and os.path.exists(potential_path):
+                    driver_path = potential_path
+
+            # 3. Final Fallback: Generic ChromeDriverManager install
+            if not driver_path:
+                logger.warning("Falling back to generic driver installation.")
                 if current_arch in ['aarch64', 'arm64']:
-                    driver = webdriver.Chrome(service=Service("/usr/bin/chromedriver"), options=options)
+                    driver_path = "/usr/bin/chromedriver"
                 else:
-                    driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
+                    driver_path = ChromeDriverManager().install()
+
+            # Initialize WebDriver
+            if driver_path:
+                logger.info(f"Initializing WebDriver with binary: {driver_path}")
+                driver = webdriver.Chrome(service=Service(driver_path), options=options)
+            else:
+                raise Exception("Could not locate or download a valid ChromeDriver.")
+
             # Suppress 'webdriver' detection
             driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
                 "source": """
@@ -175,13 +249,16 @@ async def initialize_browser():
                 """
             })
             logger.info("Initialized Selenium WebDriver successfully.")
+            
             # Navigate to an initial page to confirm browser works
             driver.get("https://debridmediamanager.com")
             logger.info("Navigated to Debrid Media Manager page.")
+            
         except Exception as e:
             logger.error(f"Failed to initialize Selenium WebDriver: {e}")
             driver = None # Ensure driver is None on failure
             raise e
+            
         # If initialization succeeded, continue with setup
         if driver:
             try:
@@ -193,11 +270,13 @@ async def initialize_browser():
                     localStorage.setItem('rd:refreshToken', '"{RD_REFRESH_TOKEN}"');
                 """)
                 logger.info("Set Real-Debrid credentials in local storage.")
+                
                 # Refresh the page to apply the local storage values
                 driver.refresh()
                 login(driver)
                 logger.info("Refreshed the page to apply local storage values.")
                 driver.refresh()
+                
                 # Handle potential premium expiration modal
                 try:
                     modal_h2 = WebDriverWait(driver, 2).until(
@@ -237,6 +316,7 @@ async def initialize_browser():
                     # Select size specified in the .env file
                     select_obj.select_by_value(MAX_MOVIE_SIZE)
                     logger.info("Biggest Movie Size Selected as {} GB.".format(MAX_MOVIE_SIZE))
+                    
                     # MAX EPISODE SIZE: Locate the maximum series size select element
                     logger.info("Locating maximum series size select element in 'Settings'.")
                     max_episode_select_elem = WebDriverWait(driver, 3).until(
@@ -247,6 +327,7 @@ async def initialize_browser():
                     # Select size specified in the .env file
                     select_obj.select_by_value(MAX_EPISODE_SIZE)
                     logger.info("Biggest Episode Size Selected as {} GB.".format(MAX_EPISODE_SIZE))
+                    
                     # Locate the "Default torrents filter" input box and insert the regex
                     logger.info("Attempting to insert regex into 'Default torrents filter' box.")
                     default_filter_input = WebDriverWait(driver, 3).until(
@@ -263,18 +344,20 @@ async def initialize_browser():
                 except (TimeoutException, NoSuchElementException, ElementClickInterceptedException) as ex:
                     logger.error(f"Error while interacting with the settings: {ex}")
                     logger.warning("Continuing without applying custom settings (TORRENT_FILTER_REGEX, MAX_MOVIE_SIZE, MAX_EPISODE_SIZE)")
+                
                 # Navigate to the library section
                 logger.info("Navigating to the library section.")
                 driver.get("https://debridmediamanager.com/library")
                 # Wait for 2 seconds on the library page before further processing
                 try:
-                    # Ensure the library page has loaded correctly (e.g., wait for a specific element on the library page)
+                    # Ensure the library page has loaded correctly
                     library_element = WebDriverWait(driver, 2).until(
-                        EC.presence_of_element_located((By.XPATH, "//div[@id='library-content']")) # Adjust the XPath as necessary
+                        EC.presence_of_element_located((By.XPATH, "//div[@id='library-content']"))
                     )
                     logger.info("Library section loaded successfully.")
                 except TimeoutException:
                     logger.info("Library loading.")
+                
                 # Wait for at least 2 seconds on the library page
                 logger.info("Waiting for 2 seconds on the library page.")
                 time.sleep(2)
@@ -290,7 +373,6 @@ async def initialize_browser():
                     logger.info(f"Found library stats text: {library_stats_text}")
                  
                     # Parse the text to extract torrent count and size
-                    # Example: "Library, 3132 torrents, 76.5 TB"
                     import re
                     from datetime import datetime
                  
